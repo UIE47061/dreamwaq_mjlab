@@ -80,3 +80,9 @@ uv run --extra dev ruff check src tests scripts
 停用外部 pytest plugins 可避免工作站 ROS plugins 干擾本專案。
 
 模型／版本來源及實作差異見 [docs/design.md](docs/design.md)。Git 排除訓練成果與大型輸出，程式、模型、lockfile、測試和數值報告可獨立推送。
+
+若首輪流水線中斷，可接續到總計 10,000 iterations，再自動評估與匯出：
+
+```bash
+uv run --extra train --extra render python scripts/first_round.py --resume logs/RUN/latest.pt
+```

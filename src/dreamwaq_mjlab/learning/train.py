@@ -140,7 +140,9 @@ def main():
     recent_falls = deque(maxlen=512)
     anchor = env.scene["robot"].data.root_link_pos_w[:, 0].clone()
     window_steps = torch.zeros(env.num_envs, dtype=torch.long, device=args.device)
-    best_score = state.get("best_score", -1.0) if args.resume else -1.0
+    best_score = (
+        state.get("best_score", -1.0) if args.resume and state.get("probe_version") == 2 else -1.0
+    )
     begin = time.monotonic()
 
     def save(iteration, name):
@@ -164,6 +166,7 @@ def main():
             "config": vars(args),
             "critic_dim": critic_dim,
             "best_score": best_score,
+            "probe_version": 2,
         }
         tmp = logdir / (name + ".tmp")
         torch.save(state, tmp)
@@ -196,7 +199,6 @@ def main():
                     # Terminal observation is read before any reset, including timeout bootstrap.
                     next_values = critic(critic_norm(terminal["critic"])).squeeze(-1) * (~term)
                     next_clean = normalizer(terminal["clean"])
-                    episode_return += rewards
                     episode_steps += 1
                     pos = env.scene["robot"].data.root_link_pos_w[:, 0]
                     window_steps += 1
@@ -212,6 +214,7 @@ def main():
                     anchor[window_due] = pos[window_due]
                     # Penalize a stalled course and end it as a failure, not a timeout.
                     rewards = rewards - 0.2 * stuck.float()
+                    episode_return += rewards
                     done = done | stuck
                     next_values = next_values * (~stuck)
                     success = env.termination_manager.get_term("course_complete").clone()
@@ -297,13 +300,16 @@ def main():
                     randomized=False,
                     device=args.device,
                     conditions=[
-                        ("stairs_up", 0.10, None),
-                        ("stairs_down", 0.10, None),
-                        ("slope_up", None, 20.0),
-                        ("slope_down", None, 20.0),
+                        ("stairs_up", 0.15, None),
+                        ("stairs_down", 0.15, None),
+                        ("slope_up", None, 25.0),
+                        ("slope_down", None, 25.0),
                     ],
                 )
-                score = sum(x["success_rate"] for x in probe) / len(probe)
+                score = sum(
+                    x["success_rate"] + 0.001 * x["mean_max_forward_m"] / x["goal_forward_m"]
+                    for x in probe
+                ) / len(probe)
                 writer.add_scalar("evaluation/success_rate", score, it)
                 (logdir / f"probe_{it + 1}.json").write_text(json.dumps(probe, indent=2))
                 if score > best_score:

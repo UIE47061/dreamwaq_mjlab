@@ -2,8 +2,11 @@
 
 import argparse
 import json
+import random
+from functools import wraps
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from dreamwaq_mjlab.deployment.export import load_policy
@@ -17,6 +20,23 @@ CONDITIONS = [
 ] + [(kind, None, angle) for kind in ("slope_up", "slope_down") for angle in (10.0, 20.0, 25.0)]
 
 
+def preserve_random_state(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        try:
+            with torch.random.fork_rng(devices=devices):
+                return function(*args, **kwargs)
+        finally:
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+
+    return wrapped
+
+
+@preserve_random_state
 def evaluate_policy(
     policy, trials=100, randomized=False, device="cuda:0", conditions=None, seed=2026
 ):

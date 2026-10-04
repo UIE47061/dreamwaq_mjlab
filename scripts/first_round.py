@@ -21,29 +21,61 @@ def call(module, args, log):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run", type=Path, help="Evaluate an already completed run")
+    p.add_argument(
+        "--resume",
+        type=Path,
+        help="Continue an interrupted first round up to total iteration 10000",
+    )
     a = p.parse_args()
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
     Path("artifacts").mkdir(exist_ok=True)
     if a.run is None:
-        call(
-            "dreamwaq_mjlab.learning.train",
-            [
+        training_args = [
+            "--num-envs",
+            512,
+            "--iterations",
+            10000,
+            "--seed",
+            42,
+            "--run-name",
+            "first_round",
+            "--eval-interval",
+            1000,
+        ]
+        if a.resume:
+            import torch
+
+            state = torch.load(a.resume, map_location="cpu", weights_only=False)
+            remaining = 10000 - state["iteration"] - 1
+            if remaining <= 0:
+                raise ValueError("Round already complete; use --run for evaluation")
+            training_args = [
                 "--num-envs",
-                512,
+                state["config"]["num_envs"],
                 "--iterations",
-                10000,
+                remaining,
                 "--seed",
                 42,
                 "--run-name",
                 "first_round",
                 "--eval-interval",
                 1000,
-            ],
-            "artifacts/first_round_train.log",
-        )
+                "--resume",
+                a.resume,
+            ]
+        call("dreamwaq_mjlab.learning.train", training_args, "artifacts/first_round_train.log")
         runs = sorted(Path("logs").glob("*_first_round"))
         run = runs[-1]
+        if a.resume:
+            source = a.resume.parent / "metrics.jsonl"
+            old_metrics = [
+                line
+                for line in source.read_text().splitlines()
+                if json.loads(line)["iteration"] <= state["iteration"]
+            ]
+            metrics = run / "metrics.jsonl"
+            metrics.write_text("\n".join(old_metrics) + "\n" + metrics.read_text())
     else:
         run = a.run
     (Path("artifacts") / "first_round_run.json").write_text(

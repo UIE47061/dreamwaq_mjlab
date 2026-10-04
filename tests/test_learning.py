@@ -127,3 +127,32 @@ def test_ppo_and_estimator_both_update_and_optimizers_resume(tmp_path):
     opt.load_state_dict(restored["optimizer"])
     ceopt.load_state_dict(restored["ce_optimizer"])
     assert len(opt.state) > 0 and len(ceopt.state) > 0
+
+
+def test_evaluation_does_not_change_training_rng():
+    import random
+
+    import numpy as np
+
+    from dreamwaq_mjlab.deployment.evaluate import preserve_random_state
+
+    @preserve_random_state
+    def evaluation():
+        random.seed(2026)
+        np.random.seed(2026)
+        torch.manual_seed(2026)
+        random.random()
+        np.random.rand()
+        torch.rand(10)
+
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    expected = (random.random(), np.random.rand(), torch.rand(4))
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
+    evaluation()
+    actual = (random.random(), np.random.rand(), torch.rand(4))
+    assert expected[0:2] == actual[0:2]
+    torch.testing.assert_close(expected[2], actual[2])

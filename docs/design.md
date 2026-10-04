@@ -43,3 +43,5 @@ Nominal 評估保留小範圍起始姿態抽樣、關閉其餘擾動；randomize
 ## 與原論文的差異與限制
 
 這是小白 V3 和 MuJoCo Warp 的方法移植，並非 Unitree A1／Isaac Gym 實驗逐項重現。使用自己的 PPO runner、上述網路／history 解讀、定向地形、小白控制參數和 reward。模型與接觸參數變更都有測試，實體馬達的熱模型／完整 torque-speed curve 尚未建模。盲爬無法在尚未接觸前取得前方樓梯幾何；學習出來的能力需以評估驗證。
+
+定期 probe 與主訓練的 Python／NumPy／PyTorch／CUDA RNG 狀態隔離。Probe 使用 15 cm／25° 的四方向 nominal 測試，每方向 5 次；最佳 checkpoint 主要按平均通過率選擇，同分時用前進距離作微小 tie-break。完整版能力驗收仍為每條件 100 次。
