@@ -1,0 +1,71 @@
+"""Create source-controlled numerical results and standalone learning plots."""
+
+import json
+import sys
+from pathlib import Path
+
+run, output = map(Path, sys.argv[1:3])
+rows = []
+for checkpoint in ("final", "best"):
+    result = json.loads((output / f"{checkpoint}_evaluation.json").read_text())
+    for r in result["results"]:
+        rows.append({"checkpoint": checkpoint, **r})
+Path("docs").mkdir(exist_ok=True)
+Path("docs/first_round_results.json").write_text(
+    json.dumps({"run": str(run), "results": rows}, indent=2)
+)
+metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
+last = metrics[-1]
+lines = [
+    "# 小白 V3 DreamWaQ 首輪成果",
+    "",
+    f"訓練資料夾：`{run}`。Seed 42；已完成 10,000 iterations。",
+    "",
+    f"最後紀錄：平均 episode {last['episode_seconds']:.2f} 秒，訓練通過比例 {last['course_success']:.1%}，地形平均 level {last['terrain_level']:.2f}/9。",
+    "",
+    "固定評估使用估測速度及 latent 均值；每列 100 次，起始姿態在小範圍內抽樣。Nominal 關閉感測雜訊、推擾及模型參數隨機化；randomized 保留完整擾動。",
+    "",
+    "| Checkpoint | 地形 | 難度 | 擾動 | 成功 | 失敗終止 | 卡住 |",
+    "|---|---|---:|---|---:|---:|---:|",
+]
+for r in rows:
+    difficulty = f"{r['height_cm']:g} cm" if r["height_cm"] is not None else f"{r['angle_deg']:g}°"
+    lines.append(
+        f"| {r['checkpoint']} | {r['terrain']} | {difficulty} | {'randomized' if r['randomized'] else 'nominal'} | {r['success_rate']:.0%} | {r['fallen_rate']:.0%} | {r['stalled_rate']:.0%} |"
+    )
+targets = [r for r in rows if r["height_cm"] == 15 or r["angle_deg"] == 25]
+for ckpt in ("final", "best"):
+    passed = all(
+        r["success_rate"] >= (0.8 if r["randomized"] else 0.9)
+        for r in targets
+        if r["checkpoint"] == ckpt
+    )
+    lines += ["", f"**{ckpt} 的 15 cm／25° 全方向驗收：{'達標' if passed else '未達標'}。**"]
+lines += [
+    "",
+    "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為连续 3 秒前進不足 10 cm；存活不代表通過。",
+    "",
+    f"完整結果、TorchScript、影片與 log：`{output}`。影片為 CPU MuJoCo sim2sim，與 GPU 評估分開解讀。Mac 原生 viewer 尚未在 Mac 本機驗證。",
+    "",
+    "下一輪調整依失敗分類決定：卡住優先檢查第一階接觸、抬腳與前進 reward；失敗終止優先檢查姿態、接觸和隨機化難度；先穩定中等難度，再提高最高難度。未自動追加訓練。",
+]
+Path("docs/first_round_report.md").write_text("\n".join(lines) + "\n")
+try:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axs = plt.subplots(2, 2, figsize=(10, 7))
+    for ax, key in zip(
+        axs.flat, ("episode_reward", "course_success", "terrain_level", "velocity_mse")
+    ):
+        ax.plot([m["iteration"] for m in metrics], [m[key] for m in metrics])
+        ax.set(xlabel="Iteration", ylabel=key)
+        ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output / "learning_curves.png", dpi=180)
+    plt.close(fig)
+except ImportError:
+    pass
+print("Report: docs/first_round_report.md")
