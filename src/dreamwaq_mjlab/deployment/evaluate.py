@@ -38,14 +38,24 @@ def preserve_random_state(function):
 
 @preserve_random_state
 def evaluate_policy(
-    policy, trials=100, randomized=False, device="cuda:0", conditions=None, seed=2026
+    policy,
+    trials=100,
+    randomized=False,
+    device="cuda:0",
+    conditions=None,
+    seed=2026,
+    video=None,
+    video_env=0,
 ):
     from mjlab.envs import ManagerBasedRlEnv
 
     from dreamwaq_mjlab.tasks.config import make_cfg
 
+    conditions = CONDITIONS if conditions is None else conditions
+    if video is not None and (len(conditions) != 1 or not 0 <= video_env < trials):
+        raise ValueError("Recording requires one condition and a valid trial index")
     results = []
-    for condition in CONDITIONS if conditions is None else conditions:
+    for condition in conditions:
         kind, height, angle = condition
         c = make_cfg(trials, randomized=randomized, kind=kind, height=height, angle=angle)
         # Nominal trials vary only starting pose; no model/sensor/push perturbation.
@@ -58,7 +68,18 @@ def evaluate_policy(
         c.auto_reset = False
         c.seed = seed
         c.scene.terrain.terrain_generator.seed = seed
-        e = ManagerBasedRlEnv(c, device=device)
+        c.viewer.env_idx = video_env
+        c.viewer.distance = 4.0
+        c.viewer.elevation = -25.0
+        if video is not None:
+            c.viewer.width, c.viewer.height = 640, 480
+            c.viewer.distance = 2.5
+            c.viewer.azimuth = 90.0
+            c.commands["twist"].debug_vis = False
+            for sensor in c.scene.sensors:
+                sensor.debug_vis = False
+        frames = []
+        e = ManagerBasedRlEnv(c, device=device, render_mode="rgb_array" if video else None)
         obs, _ = e.reset(seed=seed)
         history = History(obs["actor"])
         n = e.num_envs
@@ -80,6 +101,8 @@ def evaluate_policy(
                 action = policy(history.data)
                 action[finished] = 0.0
                 terminal, _reward, term, trunc, _ = e.step(action)
+                if video is not None and step % 2 == 0 and not finished[video_env]:
+                    frames.append(e.render())
                 pos = e.scene["robot"].data.root_link_pos_w
                 dx = pos[:, 0] - e.scene.env_origins[:, 0]
                 maxx = torch.where(~finished, torch.maximum(maxx, dx), maxx)
@@ -138,6 +161,11 @@ def evaluate_policy(
         }
         results.append(result)
         print("EVAL " + json.dumps(result), flush=True)
+        if video is not None:
+            import imageio.v3 as iio
+
+            Path(video).parent.mkdir(parents=True, exist_ok=True)
+            iio.imwrite(video, np.stack(frames), fps=25)
         e.close()
     return results
 

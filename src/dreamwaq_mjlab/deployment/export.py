@@ -49,6 +49,7 @@ def export(checkpoint, output):
         "input_shape": ["batch", 6, 45],
         "output_shape": ["batch", 12],
         "observation_order": OBS_ORDER,
+        "command_frame": "world_course_velocity_expressed_in_body_yaw_frame",
         "history_order": "oldest_to_newest",
         "history_reset": "repeat_first_observation",
         "normalization": "embedded",

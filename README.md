@@ -81,6 +81,8 @@ uv run --extra dev ruff check src tests scripts
 
 模型／版本來源及實作差異見 [docs/design.md](docs/design.md)。Git 排除訓練成果與大型輸出，程式、模型、lockfile、測試和數值報告可獨立推送。
 
+首輪已完成 10,000 iterations、512 個環境及 5,600 次正式評估。兩個 checkpoint 的 nominal 目標都通過門檻；randomized 25° 上坡只有 75%（final）／71%（best），首輪未完全達標。完整數據、CPU sim2sim 與下一輪建議見 [首輪報告](docs/first_round_report.md)。
+
 若首輪流水線中斷，可接續到總計 10,000 iterations，再自動評估與匯出：
 
 ```bash

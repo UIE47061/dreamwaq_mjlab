@@ -36,8 +36,17 @@ def make_scene(kind="flat", height=0.15, angle=25.0, render=False):
     spec.option.timestep = PHYSICS_DT
     # Nominal training defaults for the common collision contact model.
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
+    spec.option.solver = mujoco.mjtSolver.mjSOL_NEWTON
     spec.option.impratio = 10.0
     spec.option.iterations = 10
+    spec.option.tolerance = 1e-8
+    spec.option.ls_iterations = 20
+    spec.option.ls_tolerance = 0.01
+    spec.option.ccd_iterations = 50
+    for geom in spec.geoms:
+        if geom.name.endswith("_Foot_collision"):
+            geom.priority = 1
     model = spec.compile()
     data = mujoco.MjData(model)
     ids = [model.joint(n).id for n in JOINTS]
@@ -67,17 +76,29 @@ class Sim2Sim:
         self.history = np.repeat(self.observation()[None], 6, axis=0)
         self.max_torque = 0.0
         self.max_progress = 0.0
+        self.illegal_contact = False
 
     def observation(self):
         rotation = self.data.xmat[self.base].reshape(3, 3)
         omega = rotation.T @ self.data.sensor("frame_ang_vel").data
         # No frame_vel: velocity is inferred by CENet, including in sim2sim.
         gravity = rotation.T @ np.array([0.0, 0.0, -1.0])
+        # Training commands are fixed in the course/world frame, expressed in
+        # the body's yaw frame before reaching the actor.
+        heading = np.arctan2(rotation[1, 0], rotation[0, 0])
+        cos_h, sin_h = np.cos(heading), np.sin(heading)
+        command = np.array(
+            [
+                cos_h * self.command[0] + sin_h * self.command[1],
+                -sin_h * self.command[0] + cos_h * self.command[1],
+                self.command[2],
+            ]
+        )
         obs = np.concatenate(
             (
                 omega,
                 gravity,
-                self.command,
+                command,
                 self.data.qpos[self.qadr] - DEFAULT,
                 self.data.qvel[self.vadr],
                 self.action,
@@ -88,6 +109,7 @@ class Sim2Sim:
         return obs
 
     def advance(self):
+        self.illegal_contact = False
         with torch.no_grad():
             self.action = self.policy(torch.from_numpy(self.history[None])).squeeze(0).numpy()
         if not np.isfinite(self.action).all():
@@ -103,6 +125,15 @@ class Sim2Sim:
             )
             self.data.ctrl[:] = torque[self.actuator_mapping]
             mujoco.mj_step(self.model, self.data)
+            # mjlab's thigh contact history covers the four physics substeps.
+            for index, contact in enumerate(self.data.contact):
+                geoms = (int(contact.geom1), int(contact.geom2))
+                terrain_side = any(self.model.geom_bodyid[g] == 0 for g in geoms)
+                thigh_side = any("_Thigh_" in self.model.geom(g).name for g in geoms)
+                if terrain_side and thigh_side:
+                    force = np.zeros(6)
+                    mujoco.mj_contactForce(self.model, self.data, index, force)
+                    self.illegal_contact |= bool(np.linalg.norm(force[:3]) > 10.0)
             self.max_torque = max(self.max_torque, float(np.abs(torque).max()))
         # Refresh poses and sensors after integration, as mjlab does before observations.
         mujoco.mj_forward(self.model, self.data)
@@ -147,19 +178,11 @@ def run(policy, kind="flat", height=0.15, angle=25.0, seconds=20.0, headless=Fal
         elapsed = (i + 1) * 0.02
         upright = sim.data.xmat[sim.base].reshape(3, 3)[2, 2]
         lateral = abs(sim.data.qpos[1] - sim.origin[1])
-        illegal = False
-        for contact in sim.data.contact:
-            geoms = (int(contact.geom1), int(contact.geom2))
-            terrain_side = any(sim.model.geom_bodyid[g] == 0 for g in geoms)
-            thigh_side = any("_Thigh_" in sim.model.geom(g).name for g in geoms)
-            if terrain_side and thigh_side and contact.dist <= 0.0:
-                illegal = True
-                break
         if (
             not np.isfinite(sim.data.qpos).all()
             or upright < np.cos(1.22)
             or lateral > 1.8
-            or illegal
+            or sim.illegal_contact
         ):
             status = "failed"
             break

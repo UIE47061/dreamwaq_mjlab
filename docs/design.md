@@ -10,6 +10,10 @@
 
 關節順序固定 FR、FL、RL、RR，每腿 hip、thigh、calf；動作目標 clamp 到來源硬限制。KP 20、KD 0.5、torque limit 27 Nm、action scale 0.25，physics 200 Hz／policy 50 Hz。
 
+GPU 與 CPU 都使用 implicitfast、Newton 10 iterations、line search 20、CCD 50、elliptic cone 和 impratio 10，足部 contact priority 1。大腿接觸終止採最近四個 physics steps 中超過 10 N 的接觸力，並非一接觸即失敗。CPU 每個控制步後執行 forward 更新姿態與感測器。
+
+直線測試的速度指令固定在地形世界座標；輸入 actor 前，按當前 yaw 轉到機身座標，與 mjlab world command 的定義一致。CPU sim2sim 使用模擬 IMU 姿態的 yaw 進行這項指令轉換，沒有輸入真實線速度、地形高度或接觸。若後續接實體控制器，需明確選擇機身速度指令或另行維護 IMU heading 參考；本輪不交付實體控制器。
+
 ## 網路與資料流
 
 Proprioception 45 維：angular velocity 3、projected gravity 3、command 3、relative joint position 12、joint velocity 12、last action 12。CENet 使用目前和前 5 步的 6 幀歷史（270 維），ELU encoder 128→64，共享 encoder 輸出速度 3、latent 均值 16 及 log variance 16。Decoder 64→128→45 重建下一筆觀測。Loss 為 velocity MSE + next-observation MSE + β KL，預設 β=1。

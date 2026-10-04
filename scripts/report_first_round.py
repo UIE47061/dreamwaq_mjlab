@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import torch
+
 run, output = map(Path, sys.argv[1:3])
 rows = []
 for checkpoint in ("final", "best"):
@@ -11,8 +13,9 @@ for checkpoint in ("final", "best"):
     for r in result["results"]:
         rows.append({"checkpoint": checkpoint, **r})
 Path("docs").mkdir(exist_ok=True)
+videos = json.loads((output / "video_results.json").read_text())
 Path("docs/first_round_results.json").write_text(
-    json.dumps({"run": str(run), "results": rows}, indent=2)
+    json.dumps({"run": str(run), "results": rows, "cpu_video_results": videos}, indent=2)
 )
 metrics = [json.loads(line) for line in (run / "metrics.jsonl").read_text().splitlines()]
 last = metrics[-1]
@@ -29,6 +32,13 @@ lines = [
     "|---|---|---:|---|---:|---:|---:|",
 ]
 configuration = json.loads((run / "config.json").read_text())
+best_iteration = (
+    torch.load(run / "best.pt", map_location="cpu", weights_only=False)["iteration"] + 1
+)
+lines.insert(
+    4,
+    f"實際環境數 {configuration['args']['num_envs']}；每 iteration 24 steps。最佳 checkpoint 取自第 {best_iteration:,} iterations 的 nominal 小樣本 probe，不表示 randomized 驗收全部達標。",
+)
 if configuration["args"].get("resume"):
     lines.insert(
         4,
@@ -69,7 +79,12 @@ for r in targets:
         f"{round(reasons['corridor_exit'] * r['trials'])} | "
         f"{round(r['stalled_rate'] * r['trials'])} | {timeout} |"
     )
-videos = json.loads((output / "video_results.json").read_text())
+lines += [
+    "",
+    "首輪主要瓶頸是隨機化 25° 上坡。最後版本 100 次中有 13 次卡住、12 次失敗終止；最佳版本有 15 次卡住、12 次失敗終止、2 次逾時。兩者無擾動上坡均為 100%，顯示目前較弱的是擾動下的穩定性，而非 nominal 地形完全無法通過；摩擦、推擾、COM 等各自的因果影響尚未做消融。",
+    "",
+    "下一輪建議先固定 25° 上坡與評估 seed，分別測試摩擦、推擾、COM、馬達／延遲的影響；增加高坡等級訓練覆蓋與擾動恢復訓練，再按接觸／姿態／卡住分類調整 reward。最佳 checkpoint 的定期選擇也應納入 randomized 目標測試，避免只依 nominal probe 選擇。這些調整尚未執行，未追加第二輪訓練。",
+]
 lines += ["", "## CPU sim2sim 影片", ""]
 for video in videos["metrics"]:
     value = (
@@ -84,6 +99,15 @@ for video in videos["metrics"]:
     )
 if videos["errors"]:
     lines.append(f"錄影執行失敗：{', '.join(videos['errors'])}。")
+if (output / "gpu_failure_recording.json").exists():
+    recording = json.loads((output / "gpu_failure_recording.json").read_text())
+    recorded = recording["results"][0]
+    trial = recorded["trial_results"][recording["video_env"]]
+    outcome = "卡住" if trial["stalled"] else "失敗終止" if trial["failed"] else "逾時"
+    lines += [
+        "",
+        f"GPU 隨機化 25° 上坡未通過影片：`gpu_randomized_slope_up_25_failure_trial2.mp4`。使用最後 checkpoint、seed 2026、額外 100 個環境錄下 trial 2（{outcome}）。此錄影批次成功率為 {recorded['success_rate']:.0%}，不是正式驗收的 75%，也不保證逐步重現先前物理軌跡；數據在 `gpu_failure_recording.json`。CPU nominal 成功影片使用不同擾動條件。",
+    ]
 lines += [
     "",
     "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為連續 3 秒前進不足 10 cm；存活不代表通過。",
