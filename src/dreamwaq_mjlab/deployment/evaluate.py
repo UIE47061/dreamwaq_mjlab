@@ -117,13 +117,14 @@ def evaluate_policy(
             "randomized": randomized,
             "seed": seed,
             "trials": n,
-            "success_rate": float(success.float().mean()),
-            "fallen_rate": float(fallen.float().mean()),
-            "stalled_rate": float(stalled.float().mean()),
+            "success_rate": int(success.sum()) / n,
+            "successes": int(success.sum()),
+            "fallen_rate": int(fallen.sum()) / n,
+            "stalled_rate": int(stalled.sum()) / n,
             "mean_max_forward_m": float(maxx.mean()),
             "mean_duration_s": float(durations.mean()),
             "goal_forward_m": goal,
-            "failure_reasons": {name: float(mask.float().mean()) for name, mask in reasons.items()},
+            "failure_reasons": {name: int(mask.sum()) / n for name, mask in reasons.items()},
             "trial_results": [
                 {
                     "success": bool(success[j]),
