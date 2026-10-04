@@ -21,6 +21,8 @@ def test_source_geometry_inertial_and_limits_preserved():
     new = mujoco.MjModel.from_xml_path(str(ROBOT_XML))
     np.testing.assert_allclose(old.body_mass, new.body_mass)
     np.testing.assert_allclose(old.body_inertia, new.body_inertia)
+    for field in ("geom_type", "geom_size", "geom_pos", "geom_quat"):
+        np.testing.assert_allclose(getattr(old, field), getattr(new, field))
     for joint in JOINTS:
         np.testing.assert_allclose(
             old.jnt_range[old.joint(joint).id], new.jnt_range[new.joint(joint).id]

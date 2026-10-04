@@ -106,15 +106,15 @@ if (output / "gpu_failure_recording.json").exists():
     outcome = "卡住" if trial["stalled"] else "失敗終止" if trial["failed"] else "逾時"
     lines += [
         "",
-        f"GPU 隨機化 25° 上坡未通過影片：`gpu_randomized_slope_up_25_failure_trial2.mp4`。使用最後 checkpoint、seed 2026、額外 100 個環境錄下 trial 2（{outcome}）。此錄影批次成功率為 {recorded['success_rate']:.0%}，不是正式驗收的 75%，也不保證逐步重現先前物理軌跡；數據在 `gpu_failure_recording.json`。CPU nominal 成功影片使用不同擾動條件。",
+        f"GPU 隨機化 25° 上坡未通過影片：`gpu_randomized_slope_up_25_failure_trial2.mp4`。使用最後 checkpoint、seed 2026、額外 100 個環境錄下 trial 2（{outcome}）。此錄影批次成功率為 {recorded['success_rate']:.0%}，數據在 `gpu_failure_recording.json`；正式驗收仍以 `final_evaluation.json` 為準。CPU nominal 成功影片使用不同擾動條件。",
     ]
 lines += [
     "",
     "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為連續 3 秒前進不足 10 cm；存活不代表通過。",
     "",
-    f"完整結果、TorchScript、影片與 log：`{output}`。影片為 CPU MuJoCo sim2sim，與 GPU 評估分開解讀。Mac 原生 viewer 尚未在 Mac 本機驗證。",
+    f"完整結果、TorchScript、影片與 log：`{output}`。CPU nominal 與 GPU randomized 影片分別標示；Mac 原生 viewer 尚未在 Mac 本機驗證。",
     "",
-    "下一輪調整依失敗分類決定：卡住優先檢查第一階接觸、抬腳與前進 reward；失敗終止優先檢查姿態、接觸和隨機化難度；先穩定中等難度，再提高最高難度。未自動追加訓練。",
+    "工程驗證：21 項單元測試與 1 項 GPU 整合測試通過；TorchScript 重新載入後，單一與多環境輸出和原推論一致。訓練／部署共用關節、站姿、硬角度限制、PD 與扭矩限制；CPU 的積分器、接觸力門檻和 world-command 轉換已對齊。測試 logs 保存在 artifacts。",
 ]
 Path("docs/first_round_report.md").write_text("\n".join(lines) + "\n")
 try:
