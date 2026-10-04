@@ -104,6 +104,8 @@ class Sim2Sim:
             self.data.ctrl[:] = torque[self.actuator_mapping]
             mujoco.mj_step(self.model, self.data)
             self.max_torque = max(self.max_torque, float(np.abs(torque).max()))
+        # Refresh poses and sensors after integration, as mjlab does before observations.
+        mujoco.mj_forward(self.model, self.data)
         self.history = np.concatenate((self.history[1:], self.observation()[None]), axis=0)
         self.max_progress = max(self.max_progress, float(self.data.qpos[0] - self.origin[0]))
 

@@ -49,3 +49,14 @@ def test_sim2sim_mapping_and_torque_limits():
         sim.advance()
     assert sim.max_torque <= TORQUE_LIMIT
     assert np.isfinite(sim.data.qpos).all()
+
+
+def test_sim2sim_observation_uses_current_integrated_pose():
+    policy = DreamPolicy(Normalizer(45), CENet(), DreamActor()).eval()
+    sim = Sim2Sim(policy)
+    sim.data.qvel[3:6] = [1.0, 0.5, 0.2]
+    sim.advance()
+    rotation = np.zeros(9)
+    mujoco.mju_quat2Mat(rotation, sim.data.qpos[3:7])
+    expected_gravity = rotation.reshape(3, 3).T @ np.array([0.0, 0.0, -1.0])
+    np.testing.assert_allclose(sim.history[-1, 3:6], expected_gravity, atol=1e-7)
