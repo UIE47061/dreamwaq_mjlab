@@ -28,6 +28,12 @@ lines = [
     "| Checkpoint | 地形 | 難度 | 擾動 | 成功 | 失敗終止 | 卡住 |",
     "|---|---|---:|---|---:|---:|---:|",
 ]
+configuration = json.loads((run / "config.json").read_text())
+if configuration["args"].get("resume"):
+    lines.insert(
+        4,
+        f"本輪曾從 `{configuration['args']['resume']}` 接續；評估亂數狀態隔離修正後，繼續至總 iteration 10,000。前段與接續段的 metrics 已合併。",
+    )
 for r in rows:
     difficulty = f"{r['height_cm']:g} cm" if r["height_cm"] is not None else f"{r['angle_deg']:g}°"
     lines.append(
@@ -43,7 +49,7 @@ for ckpt in ("final", "best"):
     lines += ["", f"**{ckpt} 的 15 cm／25° 全方向驗收：{'達標' if passed else '未達標'}。**"]
 lines += [
     "",
-    "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為连续 3 秒前進不足 10 cm；存活不代表通過。",
+    "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為連續 3 秒前進不足 10 cm；存活不代表通過。",
     "",
     f"完整結果、TorchScript、影片與 log：`{output}`。影片為 CPU MuJoCo sim2sim，與 GPU 評估分開解讀。Mac 原生 viewer 尚未在 Mac 本機驗證。",
     "",
