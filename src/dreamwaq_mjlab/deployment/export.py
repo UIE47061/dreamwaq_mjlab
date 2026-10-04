@@ -60,6 +60,11 @@ def export(checkpoint, output):
         "action_scale": ACTION_SCALE,
         "physics_dt": PHYSICS_DT,
         "control_decimation": DECIMATION,
+        "control_hz": 1.0 / (PHYSICS_DT * DECIMATION),
+        "physics_hz": 1.0 / PHYSICS_DT,
+        "model_source_url": "https://github.com/morrisx28/csl_mujoco/tree/"
+        + SOURCE_COMMIT
+        + "/unitree_robots/little_white_v3",
         "model_source_commit": SOURCE_COMMIT,
     }
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2))
