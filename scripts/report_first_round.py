@@ -49,6 +49,43 @@ for ckpt in ("final", "best"):
     lines += ["", f"**{ckpt} 的 15 cm／25° 全方向驗收：{'達標' if passed else '未達標'}。**"]
 lines += [
     "",
+    "## 目標難度的失敗分類",
+    "",
+    "下列數字為每 100 次測試的次數；接觸、姿態與越界原因可能同時發生，不能相加當作總失敗數。逾時指未通過且未被判定為跌倒或卡住。",
+    "",
+    "| Checkpoint | 地形 | 擾動 | 接觸失敗 | 姿態失敗 | 越界 | 卡住 | 逾時 |",
+    "|---|---|---|---:|---:|---:|---:|---:|",
+]
+for r in targets:
+    reasons = r["failure_reasons"]
+    timeout = sum(
+        not (trial["success"] or trial["failed"] or trial["stalled"])
+        for trial in r["trial_results"]
+    )
+    lines.append(
+        f"| {r['checkpoint']} | {r['terrain']} | {'randomized' if r['randomized'] else 'nominal'} | "
+        f"{round(reasons['illegal_contact'] * r['trials'])} | "
+        f"{round(reasons['fell_over'] * r['trials'])} | "
+        f"{round(reasons['corridor_exit'] * r['trials'])} | "
+        f"{round(r['stalled_rate'] * r['trials'])} | {timeout} |"
+    )
+videos = json.loads((output / "video_results.json").read_text())
+lines += ["", "## CPU sim2sim 影片", ""]
+for video in videos["metrics"]:
+    value = (
+        f"{video['height_cm']:g} cm"
+        if video["kind"].startswith("stairs")
+        else f"{video['angle_deg']:g}°"
+    )
+    lines.append(
+        f"- {video['kind']} {value}：{video['status']}；"
+        f"進度 {video['max_forward_m']:.2f}/{video['goal_forward_m']:.2f} m，"
+        f"時間 {video['duration_s']:.2f} 秒。"
+    )
+if videos["errors"]:
+    lines.append(f"錄影執行失敗：{', '.join(videos['errors'])}。")
+lines += [
+    "",
     "成功是 20 秒內到達完整地形出口，且未發生失敗終止。卡住為連續 3 秒前進不足 10 cm；存活不代表通過。",
     "",
     f"完整結果、TorchScript、影片與 log：`{output}`。影片為 CPU MuJoCo sim2sim，與 GPU 評估分開解讀。Mac 原生 viewer 尚未在 Mac 本機驗證。",
