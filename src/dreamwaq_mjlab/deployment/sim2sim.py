@@ -113,6 +113,13 @@ def run(policy, kind="flat", height=0.15, angle=25.0, seconds=20.0, headless=Fal
     viewer = None
     renderer = None
     frames = []
+    status = "timeout"
+    window_anchor = sim.data.qpos[0]
+    elapsed = 0.0
+    camera = mujoco.MjvCamera()
+    camera.distance = 4.0
+    camera.azimuth = 90.0
+    camera.elevation = -25.0
     if not headless:
         from mujoco import viewer as viewer_module
 
@@ -126,7 +133,8 @@ def run(policy, kind="flat", height=0.15, angle=25.0, seconds=20.0, headless=Fal
         start = time.monotonic()
         sim.advance()
         if renderer is not None and i % 2 == 0:
-            renderer.update_scene(sim.data, camera="overview")
+            camera.lookat[:] = sim.data.qpos[:3]
+            renderer.update_scene(sim.data, camera=camera)
             frames.append(renderer.render().copy())
         if viewer:
             if not viewer.is_running():
@@ -134,6 +142,33 @@ def run(policy, kind="flat", height=0.15, angle=25.0, seconds=20.0, headless=Fal
             viewer.cam.lookat[:] = sim.data.qpos[:3]
             viewer.sync()
             time.sleep(max(0.0, 0.02 - (time.monotonic() - start)))
+        elapsed = (i + 1) * 0.02
+        upright = sim.data.xmat[sim.base].reshape(3, 3)[2, 2]
+        lateral = abs(sim.data.qpos[1] - sim.origin[1])
+        illegal = False
+        for contact in sim.data.contact:
+            geoms = (int(contact.geom1), int(contact.geom2))
+            terrain_side = any(sim.model.geom_bodyid[g] == 0 for g in geoms)
+            thigh_side = any("_Thigh_" in sim.model.geom(g).name for g in geoms)
+            if terrain_side and thigh_side and contact.dist <= 0.0:
+                illegal = True
+                break
+        if (
+            not np.isfinite(sim.data.qpos).all()
+            or upright < np.cos(1.22)
+            or lateral > 1.8
+            or illegal
+        ):
+            status = "failed"
+            break
+        if sim.data.qpos[0] - sim.origin[0] >= sim.goal:
+            status = "success"
+            break
+        if (i + 1) % 150 == 0:
+            if sim.data.qpos[0] - window_anchor < 0.1:
+                status = "stalled"
+                break
+            window_anchor = sim.data.qpos[0]
     if viewer:
         viewer.close()
     if renderer:
@@ -151,6 +186,8 @@ def run(policy, kind="flat", height=0.15, angle=25.0, seconds=20.0, headless=Fal
         "max_torque_nm": sim.max_torque,
         "final_height_m": float(sim.data.qpos[2]),
         "finite": bool(np.isfinite(sim.data.qpos).all()),
+        "status": status,
+        "duration_s": elapsed,
     }
     print(json.dumps(metrics), flush=True)
     return metrics

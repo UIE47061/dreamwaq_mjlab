@@ -46,6 +46,10 @@ def evaluate_policy(
         success = torch.zeros_like(finished)
         fallen = torch.zeros_like(finished)
         stalled = torch.zeros_like(finished)
+        reasons = {
+            name: torch.zeros_like(finished)
+            for name in ("illegal_contact", "fell_over", "corridor_exit")
+        }
         durations = torch.zeros(n, device=device)
         maxx = torch.zeros_like(durations)
         anchor = e.scene["robot"].data.root_link_pos_w[:, 0].clone()
@@ -70,6 +74,8 @@ def evaluate_policy(
                 newly = (reached | failed | blocked | trunc) & (~finished)
                 success |= reached
                 fallen |= failed
+                for name, mask in reasons.items():
+                    mask |= e.termination_manager.get_term(name) & (~finished)
                 stalled |= blocked
                 durations[newly] = (step + 1) * 0.02
                 finished |= newly
@@ -97,6 +103,17 @@ def evaluate_policy(
             "mean_max_forward_m": float(maxx.mean()),
             "mean_duration_s": float(durations.mean()),
             "goal_forward_m": goal,
+            "failure_reasons": {name: float(mask.float().mean()) for name, mask in reasons.items()},
+            "trial_results": [
+                {
+                    "success": bool(success[j]),
+                    "failed": bool(fallen[j]),
+                    "stalled": bool(stalled[j]),
+                    "max_forward_m": float(maxx[j]),
+                    "duration_s": float(durations[j]),
+                }
+                for j in range(n)
+            ],
         }
         results.append(result)
         print("EVAL " + json.dumps(result), flush=True)
