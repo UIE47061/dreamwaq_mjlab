@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from dreamwaq_mjlab.control import ASSET_DIR, JOINTS, ROBOT_XML, TORQUE_LIMIT
-from dreamwaq_mjlab.deployment.sim2sim import Sim2Sim, make_scene
+from dreamwaq_mjlab.deployment.sim2sim import Sim2Sim
 from dreamwaq_mjlab.learning.models import CENet, DreamActor, DreamPolicy, Normalizer
-from dreamwaq_mjlab.terrain_geometry import layout
+from dreamwaq_mjlab.tasks.terrains import KINDS, terrain_cfg
 
 
 def test_source_geometry_inertial_and_limits_preserved():
@@ -29,16 +29,61 @@ def test_source_geometry_inertial_and_limits_preserved():
         )
 
 
-@pytest.mark.parametrize("kind", ["stairs_up", "stairs_down", "slope_up", "slope_down"])
-def test_directed_course_has_correct_start_and_end(kind):
-    boxes, origin, goal = layout(kind, height=0.15, angle=25.0)
-    start_top = boxes[0]["pos"][2] + boxes[0]["size"][2]
-    end_top = boxes[-1]["pos"][2] + boxes[-1]["size"][2]
-    assert start_top == pytest.approx(origin[2])
-    assert (end_top > start_top) == kind.endswith("up")
-    assert goal > 3.0
-    model, data, *_ = make_scene(kind)
-    assert np.isfinite(data.qpos).all()
+def compile_patch(kind, difficulty):
+    spec = mujoco.MjSpec()
+    spec.worldbody.add_body(name="terrain")
+    cfg = terrain_cfg(kind=kind, difficulty=difficulty).sub_terrains[kind]
+    output = cfg.function(difficulty, spec, np.random.default_rng(42))
+    model = spec.compile()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    return model, data, output
+
+
+def surface_height(model, data, x, y):
+    geom = np.array([-1], dtype=np.int32)
+    distance = mujoco.mj_ray(
+        model, data, np.array([x, y, 10.0]), np.array([0.0, 0.0, -1.0]), None, 1, -1, geom
+    )
+    assert distance >= 0
+    return 10.0 - distance
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("difficulty", [0.0, 0.5, 1.0])
+def test_rough_terrain_compiles_and_origin_matches_surface(kind, difficulty):
+    model, data, output = compile_patch(kind, difficulty)
+    assert np.isfinite(model.geom_size).all() and (model.geom_size > 0).all()
+    x, y, z = output.origin
+    assert x == pytest.approx(4) and y == pytest.approx(4)
+    # Heightfield origin is a conservative neighborhood maximum for safe spawn.
+    center = surface_height(model, data, x, y)
+    assert abs(center - z) < (0.25 if kind == "wave" else 0.06)
+
+
+@pytest.mark.parametrize("kind", KINDS[:4])
+def test_pyramid_has_symmetric_stairs_in_four_directions(kind):
+    model, data, output = compile_patch(kind, 1.0)
+    for offset in (0.6, 1.8, 2.6, 3.4):
+        heights = [
+            surface_height(model, data, 4 + offset, 4),
+            surface_height(model, data, 4 - offset, 4),
+            surface_height(model, data, 4, 4 + offset),
+            surface_height(model, data, 4, 4 - offset),
+        ]
+        np.testing.assert_allclose(heights, heights[0], atol=1e-6)
+    outside = surface_height(model, data, 7.4, 4)
+    assert (output.origin[2] > outside) == kind.startswith("stairs_up")
+
+
+def test_double_pit_matches_isaaclab_two_levels():
+    model, data, output = compile_patch("high_platform", 1.0)
+    assert output.origin[2] == pytest.approx(-0.6)
+    assert surface_height(model, data, 4, 4) == pytest.approx(-0.6)
+    assert surface_height(model, data, 5.5, 4) == pytest.approx(-0.3)
+    assert surface_height(model, data, 7.5, 4) == pytest.approx(0.0)
+    model, data, _ = compile_patch("high_platform", 0.0)
+    assert surface_height(model, data, 5.5, 4) == pytest.approx(0.0)
 
 
 def test_sim2sim_mapping_and_torque_limits():
@@ -69,9 +114,9 @@ def test_sim2sim_observation_uses_current_integrated_pose():
     np.testing.assert_allclose(sim.history[-1, 3:6], expected_gravity, atol=1e-7)
 
 
-def test_sim2sim_world_command_is_expressed_in_body_yaw_frame():
+def test_sim2sim_body_command_is_independent_of_world_heading():
     policy = DreamPolicy(Normalizer(45), CENet(), DreamActor()).eval()
-    sim = Sim2Sim(policy, command=0.4)
+    sim = Sim2Sim(policy, command=(0.4, -0.2, 0.8))
     sim.data.qpos[3:7] = [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)]
     mujoco.mj_forward(sim.model, sim.data)
-    np.testing.assert_allclose(sim.observation()[6:9], [0.0, -0.4, 0.0], atol=1e-7)
+    np.testing.assert_allclose(sim.observation()[6:9], [0.4, -0.2, 0.8], atol=1e-7)

@@ -8,11 +8,13 @@ from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from dreamwaq_mjlab.checkpoint import COMMAND_FRAME, TASK_VERSION, validate_checkpoint
 from dreamwaq_mjlab.control import SOURCE_COMMIT
 from dreamwaq_mjlab.learning.history import History, adaboot_probability
 from dreamwaq_mjlab.learning.models import CENet, DreamActor, DreamPolicy, Normalizer, mlp
@@ -21,6 +23,7 @@ from dreamwaq_mjlab.learning.ppo import update
 
 def load_models(checkpoint, device="cpu"):
     state = torch.load(checkpoint, map_location=device, weights_only=False)
+    validate_checkpoint(state)
     normalizer = Normalizer(45).to(device)
     normalizer.load_state_dict(state["normalizer"])
     cenet = CENet().to(device)
@@ -44,17 +47,23 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=1000)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
+    if min(args.num_envs, args.iterations, args.eval_interval) < 1:
+        parser.error("num-envs, iterations and eval-interval must be positive")
     torch.set_num_threads(4)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
     from mjlab.envs import ManagerBasedRlEnv
 
-    from dreamwaq_mjlab.tasks.config import make_cfg
+    from dreamwaq_mjlab.tasks.config import make_cfg, task_spec
+    from dreamwaq_mjlab.tasks.mdp import tracking_errors
 
-    cfg = make_cfg(args.num_envs, flat=args.task == "flat")
+    cfg = make_cfg(args.num_envs, flat=args.task == "flat", seed=args.seed)
     cfg.seed = args.seed
     cfg.auto_reset = False
+    spec = task_spec(cfg, args.task, args.seed, args.beta)
+    if args.resume:
+        validate_checkpoint(torch.load(args.resume, map_location="cpu", weights_only=False), spec)
     try:
         env = ManagerBasedRlEnv(cfg, device=args.device)
     except (torch.OutOfMemoryError, MemoryError):
@@ -62,11 +71,12 @@ def main():
             raise
         torch.cuda.empty_cache()
         args.num_envs = 256
-        cfg = make_cfg(256, flat=args.task == "flat")
+        cfg = make_cfg(256, flat=args.task == "flat", seed=args.seed)
         cfg.seed = args.seed
         cfg.auto_reset = False
         env = ManagerBasedRlEnv(cfg, device=args.device)
-    now = datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    spec = task_spec(cfg, args.task, args.seed, args.beta)
+    now = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d_%H-%M-%S")
     logdir = Path("logs") / f"{now}_{args.run_name}"
     logdir.mkdir(parents=True)
     writer = SummaryWriter(str(logdir))
@@ -86,6 +96,7 @@ def main():
         json.dumps(
             {
                 "args": vars(args),
+                "task_spec": spec,
                 "env": asdict(cfg),
                 "model_source": SOURCE_COMMIT,
                 "mjlab_commit": "b517e0c489139e7fcee95702cfb2b01931264985",
@@ -128,26 +139,27 @@ def main():
         ]
         torch.set_rng_state(state["torch_rng"].cpu())
         torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda_rng"]])
+        # A reconstructed episode must not promote/demote restored terrain levels.
+        saved_step = env.common_step_counter
+        env.common_step_counter = 0
         obs, _ = env.reset()
+        env.common_step_counter = saved_step
     normalizer.update(obs["actor"])
     critic_norm.update(obs["critic"])
     history = History(obs["actor"])
     episode_return = torch.zeros(env.num_envs, device=args.device)
     episode_steps = torch.zeros_like(episode_return)
     recent_lengths = deque(maxlen=512)
-    recent_success = deque(maxlen=512)
-    recent_stuck = deque(maxlen=512)
     recent_falls = deque(maxlen=512)
-    anchor = env.scene["robot"].data.root_link_pos_w[:, 0].clone()
-    window_steps = torch.zeros(env.num_envs, dtype=torch.long, device=args.device)
-    best_score = (
-        state.get("best_score", -1.0) if args.resume and state.get("probe_version") == 2 else -1.0
-    )
+    best_score = state.get("best_score", -1.0) if args.resume else -1.0
     begin = time.monotonic()
 
     def save(iteration, name):
         state = {
-            "format_version": 1,
+            "format_version": 2,
+            "task_version": TASK_VERSION,
+            "command_frame": COMMAND_FRAME,
+            "task_spec": spec,
             "actor": actor.state_dict(),
             "critic": critic.state_dict(),
             "cenet": cenet.state_dict(),
@@ -166,7 +178,7 @@ def main():
             "config": vars(args),
             "critic_dim": critic_dim,
             "best_score": best_score,
-            "probe_version": 2,
+            "probe_version": 3,
         }
         tmp = logdir / (name + ".tmp")
         torch.save(state, tmp)
@@ -180,6 +192,7 @@ def main():
             raw_obs = []
             raw_critic = []
             saturated = []
+            planar_errors, angular_errors = [], []
             for _ in range(24):
                 with torch.no_grad():
                     h = normalizer(history.data)
@@ -194,35 +207,20 @@ def main():
                     actions = dist.sample()
                     log_probs = dist.log_prob(actions).sum(-1)
                     velocity = obs["velocity"].clone()
+                    command = env.command_manager.get_command("twist").clone()
                     terminal, rewards, term, trunc, _extras = env.step(actions)
                     done = term | trunc
                     # Terminal observation is read before any reset, including timeout bootstrap.
                     next_values = critic(critic_norm(terminal["critic"])).squeeze(-1) * (~term)
                     next_clean = normalizer(terminal["clean"])
                     episode_steps += 1
-                    pos = env.scene["robot"].data.root_link_pos_w[:, 0]
-                    window_steps += 1
-                    stuck = torch.zeros_like(done)
-                    window_due = window_steps >= 150
-                    stuck = (
-                        window_due
-                        & (pos - anchor < 0.1)
-                        & (terminal["clean"][:, 6] > 0.1)
-                        & (~done)
-                    )
-                    window_steps[window_due] = 0
-                    anchor[window_due] = pos[window_due]
-                    # Penalize a stalled course and end it as a failure, not a timeout.
-                    rewards = rewards - 0.2 * stuck.float()
+                    xy_error, yaw_error = tracking_errors(env, command)
+                    planar_errors.append(xy_error)
+                    angular_errors.append(yaw_error)
                     episode_return += rewards
-                    done = done | stuck
-                    next_values = next_values * (~stuck)
-                    success = env.termination_manager.get_term("course_complete").clone()
                     for i in done.nonzero().flatten().tolist():
                         episodes.append(float(episode_return[i]))
                         recent_lengths.append(float(episode_steps[i]))
-                        recent_success.append(float(success[i] and not term[i] and not stuck[i]))
-                        recent_stuck.append(float(stuck[i]))
                         recent_falls.append(float(term[i]))
                     values_to_store = {
                         "history": h,
@@ -253,8 +251,6 @@ def main():
                         history.reset(ids, obs["actor"])
                         episode_return[ids] = 0.0
                         episode_steps[ids] = 0.0
-                        anchor[ids] = env.scene["robot"].data.root_link_pos_w[ids, 0]
-                        window_steps[ids] = 0
             data = {k: torch.stack(v) for k, v in rollout.items()}
             lr, losses = update(actor, critic, cenet, optimizer, ce_optimizer, data, lr, args.beta)
             normalizer.update(torch.stack(raw_obs))
@@ -264,8 +260,8 @@ def main():
                 "adaboot": boot,
                 "episode_reward": float(np.mean(episodes)) if episodes else 0.0,
                 "episode_seconds": float(np.mean(recent_lengths)) * 0.02 if recent_lengths else 0.0,
-                "course_success": float(np.mean(recent_success)) if recent_success else 0.0,
-                "stuck_fraction": float(np.mean(recent_stuck)) if recent_stuck else 0.0,
+                "planar_velocity_rmse": float(torch.stack(planar_errors).mean().sqrt()),
+                "yaw_velocity_rmse": float(torch.stack(angular_errors).mean().sqrt()),
                 "failure_fraction": float(np.mean(recent_falls)) if recent_falls else 0.0,
                 "torque_saturation": float(torch.stack(saturated).mean()),
                 "learning_rate": lr,
@@ -299,18 +295,10 @@ def main():
                     trials=5,
                     randomized=False,
                     device=args.device,
-                    conditions=[
-                        ("stairs_up", 0.15, None),
-                        ("stairs_down", 0.15, None),
-                        ("slope_up", None, 25.0),
-                        ("slope_down", None, 25.0),
-                    ],
+                    terrains=["flat"] if args.task == "flat" else None,
                 )
-                score = sum(
-                    x["success_rate"] + 0.001 * x["mean_max_forward_m"] / x["goal_forward_m"]
-                    for x in probe
-                ) / len(probe)
-                writer.add_scalar("evaluation/success_rate", score, it)
+                score = float(np.mean([x["tracking_score"] for x in probe]))
+                writer.add_scalar("evaluation/tracking_score", score, it)
                 (logdir / f"probe_{it + 1}.json").write_text(json.dumps(probe, indent=2))
                 if score > best_score:
                     best_score = score

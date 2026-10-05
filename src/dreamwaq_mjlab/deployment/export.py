@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from dreamwaq_mjlab.checkpoint import COMMAND_FRAME, TASK_VERSION, validate_checkpoint
 from dreamwaq_mjlab.control import (
     ACTION_SCALE,
     DECIMATION,
@@ -23,6 +24,7 @@ from dreamwaq_mjlab.learning.models import CENet, DreamActor, DreamPolicy, Norma
 
 def load_policy(checkpoint, device="cpu"):
     state = torch.load(checkpoint, map_location=device, weights_only=False)
+    validate_checkpoint(state)
     norm = Normalizer(45).to(device)
     norm.load_state_dict(state["normalizer"])
     cenet = CENet().to(device)
@@ -44,12 +46,13 @@ def export(checkpoint, output):
             h = torch.randn(n, 6, 45)
             torch.testing.assert_close(restored(h), policy(h))
     metadata = {
-        "version": 1,
+        "version": 2,
+        "task_version": TASK_VERSION,
         "checkpoint": str(checkpoint),
         "input_shape": ["batch", 6, 45],
         "output_shape": ["batch", 12],
         "observation_order": OBS_ORDER,
-        "command_frame": "world_course_velocity_expressed_in_body_yaw_frame",
+        "command_frame": COMMAND_FRAME,
         "history_order": "oldest_to_newest",
         "history_reset": "repeat_first_observation",
         "normalization": "embedded",

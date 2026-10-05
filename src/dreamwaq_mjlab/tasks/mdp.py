@@ -34,42 +34,41 @@ def velocity(env):
     return env.scene["robot"].data.root_link_lin_vel_b
 
 
-def forward_progress(env):
-    command = env.command_manager.get_command("twist")
-    return env.scene["robot"].data.root_link_lin_vel_w[:, 0].clamp(-0.5, 1.0) * (
-        command[:, 0] > 0.1
+def vertical_bounce(env, deadband=0.2):
+    """Allow gentle elevation changes; penalize rapid world-frame bouncing."""
+    vz = env.scene["robot"].data.root_link_lin_vel_w[:, 2]
+    return (vz.abs() - deadband).clamp_min(0).square()
+
+
+def prolonged_flight(env, sensor_name, grace_time=0.08):
+    """Penalize all-feet flight after a short terrain-transition allowance."""
+    data = env.scene[sensor_name].data
+    assert data.current_air_time is not None
+    assert data.found is not None
+    all_airborne = (data.found == 0).reshape(env.num_envs, -1).all(dim=-1)
+    flight_time = data.current_air_time.reshape(env.num_envs, -1).amin(dim=-1)
+    return all_airborne.float() * (flight_time > grace_time).float()
+
+
+def tracking_errors(env, command=None):
+    """Planar yaw-frame and world yaw-rate squared errors."""
+    r = env.scene["robot"].data
+    command = env.command_manager.get_command("twist") if command is None else command
+    yaw = r.heading_w
+    vx, vy = r.root_link_lin_vel_w[:, 0], r.root_link_lin_vel_w[:, 1]
+    actual = torch.stack(
+        (yaw.cos() * vx + yaw.sin() * vy, -yaw.sin() * vx + yaw.cos() * vy), dim=-1
     )
+    xy = (actual - command[:, :2]).square().sum(-1)
+    angular = (r.root_link_ang_vel_w[:, 2] - command[:, 2]).square()
+    return xy, angular
 
 
-def corridor_exit(env):
-    pos = env.scene["robot"].data.root_link_pos_w - env.scene.env_origins
-    return (pos[:, 0] > 6.4) | (pos[:, 0] < -0.6) | (pos[:, 1].abs() > 1.8)
+def track_planar_velocity(env, std, command_name):
+    xy, _ = tracking_errors(env, env.command_manager.get_command(command_name))
+    return torch.exp(-xy / std**2)
 
 
-def crossed_course(env):
-    t = env.scene.terrain
-    names = list(t.cfg.terrain_generator.sub_terrains)
-    threshold = torch.tensor(
-        [3.85 if n.startswith("stairs") else 4.8 for n in names], device=env.device
-    )
-    x = env.scene["robot"].data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
-    return x >= threshold[t.terrain_types]
-
-
-def terrain_curriculum(env, env_ids):
-    t = env.scene.terrain
-    if env.common_step_counter == 0 or not hasattr(env, "reset_terminated"):
-        return {"mean": t.terrain_levels.float().mean()}
-    passed = crossed_course(env)[env_ids] & (~env.reset_terminated[env_ids])
-    # Failed/blocked episodes demote; simply staying alive is not progression.
-    failed = ~passed
-    t.update_env_origins(env_ids, passed, failed)
-    out = {"mean": t.terrain_levels.float().mean()}
-    for i, name in enumerate(t.cfg.terrain_generator.sub_terrains):
-        mask = t.terrain_types == i
-        out[name] = (
-            t.terrain_levels[mask].float().mean()
-            if mask.any()
-            else torch.tensor(0.0, device=env.device)
-        )
-    return out
+def track_yaw_velocity(env, std, command_name):
+    _, angular = tracking_errors(env, env.command_manager.get_command(command_name))
+    return torch.exp(-angular / std**2)

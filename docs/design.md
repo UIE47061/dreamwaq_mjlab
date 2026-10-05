@@ -10,9 +10,9 @@
 
 關節順序固定 FR、FL、RL、RR，每腿 hip、thigh、calf；動作目標 clamp 到來源硬限制。KP 20、KD 0.5、torque limit 27 Nm、action scale 0.25，physics 200 Hz／policy 50 Hz。
 
-GPU 與 CPU 都使用 implicitfast、Newton 10 iterations、line search 20、CCD 50、elliptic cone 和 impratio 10，足部 contact priority 1。大腿接觸終止採最近四個 physics steps 中超過 10 N 的接觸力，並非一接觸即失敗。CPU 每個控制步後執行 forward 更新姿態與感測器。
+GPU 與 CPU 都使用 implicitfast、Newton 10 iterations、line search 20、CCD 50、elliptic cone 和 impratio 10，足部 contact priority 1。新版機身接地終止採最近四個 physics steps 中超過 1 N 的 trunk 接觸力；大腿接觸僅懲罰。CPU 每個控制步後執行 forward 更新姿態與感測器。
 
-直線測試的速度指令固定在地形世界座標；輸入 actor 前，按當前 yaw 轉到機身座標，與 mjlab world command 的定義一致。CPU sim2sim 使用模擬 IMU 姿態的 yaw 進行這項指令轉換，沒有輸入真實線速度、地形高度或接觸。若後續接實體控制器，需明確選擇機身速度指令或另行維護 IMU heading 參考；本輪不交付實體控制器。
+新版指令為機身 yaw frame 的平面速度與 yaw rate，隨機目標朝向透過 heading controller 轉換成角速度指令。Actor 只接收最終三維速度指令，不接收絕對朝向。CPU 平地 sim2sim 同樣直接使用機身指令；metadata 以 task_version=2 與 body_yaw_velocity 辨識，拒絕舊版世界座標指令模型。
 
 ## 網路與資料流
 
@@ -26,26 +26,28 @@ PPO actor 接收 normalization 後目前觀測、3 維速度與 16 維 latent（
 
 Normalization 在每個 rollout 期間固定，rollout 結束才更新統計。Critic 有獨立 normalizer。PPO 設定：24 rollout steps、5 epochs、4 minibatches、clip .2、γ .99、GAE λ .95、entropy .01、gradient norm 1，adaptive learning rate 1e-5～1e-3。CENet Adam learning rate 1e-3，gradient norm 1。
 
-## 地形、randomization 和評估
+## 地形、課程與原版差異
 
-使用有方向的 5 階直線樓梯與 3 m 連續斜坡。出生在入口平台，出口在障礙後方；同一幾何生成程式供 GPU 及 CPU 使用。訓練比例各 20%：平地、上／下樓梯、上／下坡；10 difficulty levels，階高 2～15 cm、階深 30～40 cm、坡度 0～25°。
+參考 [Quadruped_Dwaq_Lab / ROUGH_TERRAINS_CFG](https://github.com/UIE47061/Quadruped_Dwaq_Lab/blob/a8c43c943fc76349ef8e43f81cfd99f3ad90e66c/TienKung-Lab/legged_lab/terrains/terrain_generator_cfg.py)。此版本的 LittleWhiteDwaqEnvCfg 使用 ROUGH_TERRAINS_CFG，而非 DWAQ_TERRAINS_CFG。任務移植保留地形參數、比例、指令分布與距離課程；保留本專案網路、控制、一般獎勵及隨機化，並非完整複製舊版獎勵／演算法／物理引擎。
 
-課程在通過且未失敗時升級，其他結束／卡住時降級，首次 reset 不變動。訓練的樓梯出口距離取最長階深的保守出口；固定評估依 35 cm 階深計算確切出口。Reward 沿用現有小白 rough 的速度、姿態、動作平滑、足部與接觸適配，加向前進度 reward 0.5；卡住終止加 -0.2 penalty。
+mjlab 原生 MuJoCo box 生成正／倒金字塔樓梯及隨機格子，heightfield 生成粗糙、波浪和坡面。每塊 8×8 m，10 級難度；每種地形一欄，比例決定機器人分配，與 Isaac Lab 20 欄配置不同。
 
-預設 randomization：
+階高參數 0～23 cm。mjlab 階數為 floor((8−2×1−3)/(2×階深))，分別 5、4、5、4；中央實際平台邊長約 3.20、3.44、3.00、3.28 m。Isaac Lab 2.1 另加一圈台階、內部平台更小，中心高度也不同；本版沿用 mjlab 原生幾何，不聲稱逐頂點一致。實際高度與出生點以幾何測試／預覽確認。
 
-- 起點 x ±0.1 m、y ±0.15 m、yaw ±0.15 rad，額外 z 0.01～0.05 m；前進速度指令 0.2～0.6 m/s。
-- Actor 觀測 uniform noise ±0.02（統一基準，與原論文各感測尺度設定不同）；critic／CENet supervision 無動態觀測雜訊。持續 encoder bias ±0.015 rad。
-- 腳部 sliding friction 0.3～1.5、spin friction 1e-4～2e-2、rolling friction 1e-5～5e-3（本模型 condim 3，spin/rolling 參數已保存但不產生相應自由度摩擦力）。
-- 機身密度 scale 0.9～1.1、COM x/y ±2.5 cm、z ±3 cm，使用 pseudo-inertia 同時調整質量／慣量，保持物理一致。
-- KP、KD、motor strength 各 0.9～1.1；PD torque 先乘 strength，再 clamp ±27 Nm。
-- Physics-step command delay 0～3 steps，即 0～15 ms，每 200 physics steps 重抽。
-- 每 1～3 秒推擾：linear velocity x/y ±0.5、z ±0.4 m/s，angular roll/pitch ±0.52、yaw ±0.78 rad/s。
+隨機格子的高度是在 ±bound 取樣，中心平臺高度為正 bound；rough 噪聲固定 −2～4 cm，不隨課程難度縮放。波浪與坡面沿用 mjlab 原生 heightfield；MuJoCo heightfield 接觸和 Isaac Lab 的三角網格接觸不同，斜坡陡邊不套用 Isaac 的 slope_threshold 網格校正。
 
-Nominal 評估保留小範圍起始姿態抽樣、關閉其餘擾動；randomized 使用以上全部設定。100 次包含不同起始姿態而非重複完全相同的 rollout。每次 20 s，前進速度 0.4 m/s；出口、跌倒／非法接觸／越界及卡住決定結果。
+雙層坑依 [Isaac Lab 2.1 pit_terrain](https://github.com/isaac-sim/IsaacLab/blob/v2.1.0/source/isaaclab/isaaclab/terrains/trimesh/mesh_terrains.py) 實作：外圈頂面 0、內圈 −d、中心 −2d，中圈邊長為 platform_width + (size−platform_width)×0.6。d=0～0.3 m；以實心底板避免零難度產生零厚度碰撞體。保留原設定名稱 high_platform，但它實際是坑。
 
-## 與原論文的差異與限制
+初始難度 0～5；平面距出生原點 >4 m 升級，低於目前指令平面速度×20秒×0.5 降級，升級優先。首次 reset 不更新；resume 重建 episodes 也暫停一次課程更新。站立／旋轉沒有單向卡住判定。課程使用終點位移而非積分路程，與參考版本一致。
 
-這是小白 V3 和 MuJoCo Warp 的方法移植，並非 Unitree A1／Isaac Gym 實驗逐項重現。使用自己的 PPO runner、上述網路／history 解讀、定向地形、小白控制參數和 reward。模型與接觸參數變更都有測試，實體馬達的熱模型／完整 torque-speed curve 尚未建模。盲爬無法在尚未接觸前取得前方樓梯幾何；學習出來的能力需以評估驗證。
+## 隨機化、評估與版本
 
-定期 probe 與主訓練的 Python／NumPy／PyTorch／CUDA RNG 狀態隔離。Probe 使用 15 cm／25° 的四方向 nominal 測試，每方向 5 次；最佳 checkpoint 主要按平均通過率選擇，同分時用前進距離作微小 tie-break。完整版能力驗收仍為每條件 100 次。
+隨機化沿用本專案摩擦各軸、質量／pseudo inertia、PD、motor strength、encoder bias、控制延遲、推擾及 proprioception 雜訊。Nominal 關閉模型／感測／推擾擾動，但仍抽樣起始 XY／yaw；actor 與 clean 分開，critic 無觀測雜訊。
+
+平面追蹤使用實際世界線速度轉到機身 yaw frame，角速度追蹤使用世界 z yaw rate；避免傾斜時把完整 body frame 與 yaw frame 混用。速度估測監督目標仍為三維 body-frame 真實速度。
+
+Probe 和正式評估使用 CENet 估測速度及 latent 均值。每個條件固定 20 秒，分數為線／角速度指數追蹤各半，提前終止後計零，條件等權平均。評估一次生成全部所需地形及難度，最多 128 個環境分批執行，保護 Python／NumPy／PyTorch／CUDA RNG；固定動作在 command resampling 後重新套用，random 條件保留 heading controller。
+
+Checkpoint 存 task version、指令座標、完整地形／指令配置、task、seed、beta、環境數。Resume 必須匹配全部配置，舊單向 checkpoint 不能續訓／Play／匯出。既有資料保留供歷史參考。
+
+訓練使用 explicit reset 前 terminal observation，time_out／地圖越界保留 value bootstrap，跌倒／機身接觸遮罩 bootstrap。Play 採 auto reset，依 episode_length_buf 分別重置六幀歷史。CPU sim2sim 只驗證平地部署；新版混合地形由 mjlab 執行。
